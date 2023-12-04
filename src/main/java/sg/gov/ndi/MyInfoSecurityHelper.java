@@ -2,7 +2,9 @@ package sg.gov.ndi;
 
 import java.net.URI;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.security.interfaces.ECPrivateKey;
 import java.security.interfaces.RSAPublicKey;
@@ -18,6 +20,7 @@ import com.auth0.jwt.JWT;
 import com.auth0.jwt.JWTVerifier;
 import com.auth0.jwt.algorithms.Algorithm;
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.nimbusds.jose.JOSEException;
 import com.nimbusds.jose.JOSEObjectType;
 import com.nimbusds.jose.JWEDecrypter;
 import com.nimbusds.jose.JWEObject;
@@ -28,6 +31,7 @@ import com.nimbusds.jose.JWSSigner;
 import com.nimbusds.jose.JWSVerifier;
 import com.nimbusds.jose.crypto.ECDHDecrypter;
 import com.nimbusds.jose.crypto.ECDSASigner;
+import com.nimbusds.jose.crypto.factories.DefaultJWSSignerFactory;
 import com.nimbusds.jose.crypto.factories.DefaultJWSVerifierFactory;
 import com.nimbusds.jose.jwk.Curve;
 import com.nimbusds.jose.jwk.ECKey;
@@ -43,9 +47,12 @@ import com.nimbusds.jwt.EncryptedJWT;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
 import com.nimbusds.oauth2.sdk.dpop.DPoPProofFactory;
+import com.nimbusds.oauth2.sdk.dpop.DPoPUtils;
 import com.nimbusds.oauth2.sdk.dpop.DefaultDPoPProofFactory;
 import com.nimbusds.oauth2.sdk.id.JWTID;
 import com.nimbusds.oauth2.sdk.token.AccessToken;
+import com.nimbusds.oauth2.sdk.util.StringUtils;
+import com.nimbusds.openid.connect.sdk.Nonce;
 
 
 public class MyInfoSecurityHelper {
@@ -227,27 +234,48 @@ public class MyInfoSecurityHelper {
 		}
 	}
 	
-	public static String generateDPoP(String url, String method, ECKey sessionPopKeyPair, AccessToken ath, String uuid) throws MyInfoException {
+public static String generateDPoP(String url, String method, ECKey sessionPopKeyPair, AccessToken ath, String uuid) throws MyInfoException {
 		
 		SignedJWT proof = null;
 		try {
-			Date iat = new Date();        
+			Date iat = new Date();
 	        JWTID jti = new JWTID(40);        
 	        URI uri = new URI(url);       
-			
-			// Create a DPoP proof factory for the EC key
-	        DPoPProofFactory proofFactory = new DefaultDPoPProofFactory(
-	        		sessionPopKeyPair,
-			    JWSAlgorithm.ES256);
-			
-			// Generate a new DPoP proof for the token request
-	        if(ath != null) {
+	        // 2 minutes in milliseconds
+	     	long twoMinutesInMillis = 2 * 60 * 1000; 
+	     	Date exp = new Date(iat.getTime() + twoMinutesInMillis);
+	     	
+	     	JWK jwk = sessionPopKeyPair;
+	        
+	        JOSEObjectType TYPE = new JOSEObjectType("dpop+jwt");
+	        
+	        JWSHeader jwsHeader = new JWSHeader.Builder(JWSAlgorithm.ES256)
+	    			.type(TYPE)
+	    			.jwk(jwk.toPublicJWK())
+	    			.build();
+
+	        JWTClaimsSet.Builder builder = new JWTClaimsSet.Builder()
+	    			.jwtID(jti.getValue())
+	    			.claim("htm", method)
+	    			.issueTime(iat)
+	    			.expirationTime(exp);
+	        
+	        if (ath != null) {
 	        	uri = new URI(url+"/"+uuid);
-	        	proof = proofFactory.createDPoPJWT(jti, method, uri, iat, ath, null);
-	        } else {
-	        	proof = proofFactory.createDPoPJWT(jti, method, uri, iat, null, null);
-	        }
-			
+				builder = builder.claim("ath", computeSHA256(ath).toString())
+						.claim("htu", uri.toString());
+			} else {
+				builder = builder.claim("htu", uri.toString());
+			}
+	        
+	        JWTClaimsSet jwtClaimsSet = builder.build();
+	        
+	        DefaultJWSSignerFactory factory = new DefaultJWSSignerFactory();
+	        JWSSigner jwsSigner = factory.createJWSSigner(jwk, JWSAlgorithm.ES256);
+	        
+	        
+	        proof = new SignedJWT(jwsHeader, jwtClaimsSet);
+	        proof.sign(jwsSigner);
 			
 		} catch(Exception e) {
 			throw new MyInfoException(e.getMessage());
@@ -291,5 +319,20 @@ public class MyInfoSecurityHelper {
 			
 			return jwt;
 	}
+	
+	private static Base64URL computeSHA256(final AccessToken accessToken)
+			throws JOSEException {
+			
+			byte[] hash;
+			try {
+				MessageDigest md = MessageDigest.getInstance("SHA-256");
+				hash = md.digest(accessToken.getValue().getBytes(StandardCharsets.UTF_8));
+			} catch (NoSuchAlgorithmException e) {
+				throw new JOSEException(e.getMessage(), e);
+			}
+			
+			return Base64URL.encode(hash);
+		}
+		
 
 }
